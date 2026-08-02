@@ -77,6 +77,38 @@ describe("git-toplevel resolution parity", () => {
     expect(w.project).toBe("parity-fixture-repo");
   });
 
+  it("multi-root watcher stamps each event with its own root's project", async () => {
+    const { writeFileSync } = await import("node:fs");
+    const repoB = join(tmpRoot, "second-fixture-repo");
+    mkdirSync(repoB, { recursive: true });
+    execFileSync("git", ["init", "--quiet"], { cwd: repoB, stdio: "ignore" });
+    writeFileSync(join(repoDir, "a.txt"), "alpha", "utf8");
+    writeFileSync(join(repoB, "b.txt"), "beta", "utf8");
+
+    const calls: Array<{ project: unknown; cwd: unknown }> = [];
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (_url: unknown, init?: { body?: string }) => {
+      const body = JSON.parse(init?.body ?? "{}");
+      calls.push({ project: body.project, cwd: body.cwd });
+      return { ok: true, json: async () => ({}) } as Response;
+    }) as typeof fetch;
+    try {
+      const w = new FilesystemWatcher({
+        roots: [repoDir, repoB],
+        baseUrl: "http://localhost:3111",
+        logger: {},
+      });
+      await w.flush(w.roots[0], "a.txt");
+      await w.flush(w.roots[1], "b.txt");
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+
+    expect(calls).toHaveLength(2);
+    expect(calls[0].project).toBe("parity-fixture-repo");
+    expect(calls[1].project).toBe("second-fixture-repo");
+  });
+
   it("watcher falls back to the root basename outside a repository", () => {
     const plain = join(tmpRoot, "plain-dir");
     mkdirSync(plain, { recursive: true });

@@ -142,6 +142,12 @@ export class FilesystemWatcher {
     this.project =
       config.project ||
       (this.roots[0] ? deriveProjectName(this.roots[0]) : "filesystem-watcher");
+    // Per-root scope: a multi-root watcher must stamp each event with the
+    // project of the root that produced it, not the first root's project.
+    // An explicit config.project overrides for every root.
+    this.projectByRoot = new Map(
+      this.roots.map((r) => [r, config.project || deriveProjectName(r)]),
+    );
     this.sessionId =
       config.sessionId ||
       `fs-watcher-${Date.now().toString(36)}-${randomBytes(3).toString("hex")}`;
@@ -232,7 +238,7 @@ export class FilesystemWatcher {
     const payload = {
       hookType: "post_tool_use",
       sessionId: this.sessionId,
-      project: this.project,
+      project: this.projectByRoot.get(rootDir) ?? this.project,
       cwd: rootDir,
       timestamp: new Date().toISOString(),
       data: {

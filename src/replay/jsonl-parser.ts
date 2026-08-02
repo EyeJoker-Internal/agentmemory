@@ -130,7 +130,7 @@ export function parseJsonlText(text: string, fallbackSessionId?: string): Parsed
 
   for (const entry of entries) {
     if (entry.sessionId && !sessionId) sessionId = entry.sessionId;
-    if (entry.cwd && !cwd) cwd = entry.cwd;
+    if (typeof entry.cwd === "string" && entry.cwd.trim() && !cwd) cwd = entry.cwd;
     const ts = entry.timestamp || new Date().toISOString();
     if (!firstTs) firstTs = ts;
     lastTs = ts;

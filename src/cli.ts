@@ -1255,6 +1255,26 @@ function printReadyHint(consoleState: IiiConsoleState): void {
 }
 
 async function main() {
+  // Booting a second instance next to a live daemon registers a duplicate
+  // worker on the running engine, and on iii 0.11.2 the second instance's
+  // shutdown tears down the daemon's HTTP trigger routing (every
+  // /agentmemory/* route 404s until a full engine restart). Refuse instead.
+  // A different --instance resolves to a different port, so multi-instance
+  // setups are unaffected.
+  try {
+    const probe = await fetch(`${getBaseUrl()}/agentmemory/livez`, {
+      signal: AbortSignal.timeout(1500),
+    });
+    if (probe.ok) {
+      p.log.error(
+        `agentmemory is already running on port ${getRestPort()}. Starting a second instance here would corrupt the running daemon's REST routing. Use the REST API (or the MCP tools) against the running instance, run a different --instance, or stop it first with \`agentmemory stop\`.`,
+      );
+      process.exit(1);
+    }
+  } catch {
+    // no live daemon on this port; boot normally
+  }
+
   // `--reset` wipes preferences before anything else so the onboarding
   // flow below always runs fresh.
   if (IS_RESET) {
@@ -3049,7 +3069,18 @@ const commands: Record<string, () => Promise<void>> = {
   "import-jsonl": runImportJsonl,
 };
 
-const handler = commands[args[0] ?? ""] ?? main;
+const first = args[0] ?? "";
+async function unknownCommand(): Promise<void> {
+  p.log.error(
+    `Unknown command: ${first}. Supported: ${Object.keys(commands).join(", ")}. Run \`agentmemory\` with no arguments to start the memory server, or \`agentmemory --help\` for usage.`,
+  );
+  process.exit(1);
+}
+// Only a bare invocation or flag-style args boot the server; an unrecognized
+// word is an error. Previously any typo (or a guessed subcommand like
+// `agentmemory consolidate`) fell through to the full server boot and could
+// break a running daemon.
+const handler = commands[first] ?? (first && !first.startsWith("-") ? unknownCommand : main);
 handler().catch((err) => {
   p.log.error(err instanceof Error ? err.message : String(err));
   process.exit(1);

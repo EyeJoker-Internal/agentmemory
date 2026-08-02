@@ -26,7 +26,9 @@ export interface ParsedTranscript {
 
 function deriveProject(cwd: string): string {
   if (!cwd) return "unknown";
-  const parts = cwd.split("/").filter(Boolean);
+  // Split on both separators so a Windows-recorded cwd yields its basename
+  // instead of the whole raw path becoming the project scope.
+  const parts = cwd.split(/[\\/]+/).filter(Boolean);
   return parts[parts.length - 1] || "unknown";
 }
 

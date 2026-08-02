@@ -319,7 +319,9 @@ export function configFromEnv(env = process.env) {
     roots,
     baseUrl: env.AGENTMEMORY_URL,
     secret: env.AGENTMEMORY_SECRET,
-    project: env.AGENTMEMORY_PROJECT || null,
+    // AGENTMEMORY_PROJECT_NAME is the canonical override (matches the hooks);
+    // AGENTMEMORY_PROJECT stays as a deprecated alias for existing setups.
+    project: env.AGENTMEMORY_PROJECT_NAME || env.AGENTMEMORY_PROJECT || null,
     sessionId: env.AGENTMEMORY_SESSION_ID || null,
     ignorePatterns: extraIgnore,
     allowBinary: env.AGENTMEMORY_FS_WATCH_ALLOW_BINARY === "1",

@@ -2,6 +2,7 @@ import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Type } from "typebox";
 import path from "node:path";
 import crypto from "node:crypto";
+import { execFileSync } from "node:child_process";
 import { createPlaintextBearerAuthGuard } from "./security.js";
 
 type TextBlock = { type?: string; text?: string };
@@ -120,7 +121,31 @@ export default function agentmemoryExtension(pi: ExtensionAPI) {
     );
   }
   let sessionId = `ephemeral-${crypto.randomUUID().slice(0, 8)}`;
-  let currentProject = process.cwd();
+  // Canonical project scope, matching the hooks' resolveProject order (env
+  // override, git toplevel basename, cwd basename) so Pi sessions share a
+  // project bucket with every other agent instead of scoping on a raw path.
+  const projectCache = new Map<string, string>();
+  function resolveProjectName(dir: string): string {
+    const explicit = process.env["AGENTMEMORY_PROJECT_NAME"]?.trim();
+    if (explicit) return explicit;
+    const cached = projectCache.get(dir);
+    if (cached) return cached;
+    let name = path.basename(dir) || dir;
+    try {
+      const top = execFileSync("git", ["rev-parse", "--show-toplevel"], {
+        cwd: dir,
+        stdio: ["ignore", "pipe", "ignore"],
+        encoding: "utf8",
+      }).trim();
+      if (top) name = path.basename(top);
+    } catch {
+      // not a git repo
+    }
+    projectCache.set(dir, name);
+    return name;
+  }
+  let currentCwd = process.cwd();
+  let currentProject = resolveProjectName(currentCwd);
   let lastPrompt = "";
   let lastHealthOk = false;
 
@@ -227,12 +252,14 @@ export default function agentmemoryExtension(pi: ExtensionAPI) {
   pi.on("session_start", async (_event, ctx) => {
     const sessionFile = ctx.sessionManager.getSessionFile();
     sessionId = sessionFile ? path.basename(sessionFile).replace(/\.[^.]+$/, "") : `ephemeral-${crypto.randomUUID().slice(0, 8)}`;
-    currentProject = process.cwd();
+    currentCwd = process.cwd();
+    currentProject = resolveProjectName(currentCwd);
     await refreshStatus(ctx);
   });
 
   pi.on("before_agent_start", async (event, ctx) => {
-    currentProject = event.systemPromptOptions.cwd || process.cwd();
+    currentCwd = event.systemPromptOptions.cwd || process.cwd();
+    currentProject = resolveProjectName(currentCwd);
     lastPrompt = event.prompt?.trim() || "";
     if (!lastPrompt) return;
 
@@ -262,7 +289,7 @@ export default function agentmemoryExtension(pi: ExtensionAPI) {
         hookType: "post_tool_use",
         sessionId,
         project: currentProject,
-        cwd: currentProject,
+        cwd: currentCwd,
         timestamp: new Date().toISOString(),
         data: {
           tool_name: "conversation",

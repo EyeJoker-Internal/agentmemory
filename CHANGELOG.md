@@ -6,6 +6,49 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.9.29] — 2026-08-02
+
+Patch release: the `.env` file now actually applies everywhere, imports become searchable, consolidation runs on session stop, twelve MCP-only agents get activated on connect, and every capture surface finally agrees on what "project" means. No breaking changes; read the upgrade notes below for four behavior changes you will notice.
+
+### Upgrade notes
+
+- `~/.agentmemory/.env` values that were silently ignored by most modules now take effect on boot. If that file has stale entries from past experiments, review it before upgrading.
+- `agentmemory connect <agent>` now writes a short memory-usage guideline into the agent's native rules file (Cursor, Cline, Continue, Zed, Warp, Kiro, Gemini CLI, Qwen, OpenCode, Droid, Copilot CLI, Antigravity) so MCP-only agents actually call the memory tools. Pass `--no-guidelines` to opt out.
+- Installs with an LLM key now run consolidation and crystallization on session stop (previously they never fired), debounced to once per 5 minutes (`AGENTMEMORY_CONSOLIDATION_COOLDOWN_MS`).
+- Local embeddings re-download once after the `@huggingface/transformers` migration (different model cache directory). Model IDs are unchanged.
+
+### Added
+
+- `--data-dir` flag and `AGENTMEMORY_DATA_DIR` so iii-engine state lives outside repositories, with gated legacy `./data` adoption and Docker-volume preservation (#314)
+- Native hooks adapter for Droid via `~/.factory/hooks.json`, reusing the bundled hook scripts (#1130)
+- `mem::graph::import-graphify` and `POST /agentmemory/graph/import-graphify`: merge graphify's `graph.json` into the knowledge graph with confidence tags carried over as edge weights (#1136)
+- Connector guideline activation for twelve hook-less agents, with every rules-file path verified against the agent's official documentation (#1136)
+- Honest `memory_forget` reporting plus a real lesson delete path (`mem::lesson-delete`, `DELETE`-style REST route, MCP tool) (#1132)
+- `AGENTMEMORY_PROJECT_NAME` override in the OpenCode plugin (#1125)
+- Provider fetches retry 429/503 honoring `Retry-After` under a total-elapsed budget capped below the iii invocation timeout (#1136)
+
+### Fixed
+
+- Boot hydrates `~/.agentmemory/.env` into `process.env`, closing the class of "env var in .env is ignored" bugs (#1136)
+- Imported and replayed observations are indexed into BM25 and the vector index, so imports are searchable (#1072, via #1136)
+- Snapshot timer actually runs, non-positive intervals clamp to the default, and snapshot creation is serialized across timer, REST, and MCP (#1006, via #1136)
+- CJK-aware dedup with NFC normalization and an exact-match fallback for short memories (#1021, via #1136)
+- OpenRouter embeddings no longer hardcode 1536 dimensions (#1002, via #1136)
+- Viewer decodes multibyte request bodies correctly (#930, via #1136)
+- Session-stop consolidation is debounced and no longer double-fires from the client hook; eviction recovery is bounded to one consolidation pass (#1087, #1131 class, via #1136)
+- `/agentmemory/sessions` no longer deadlocks on large session counts (#1100, via #1136)
+- Filesystem watcher validates roots before `fs.watch`, fixing Node 24/26 on Linux (#1136)
+- Claude bridge writes `MEMORY.md` under the `memory/` subdirectory Claude Code actually reads (#1134)
+- Hook project-resolution tests no longer depend on the checkout directory name (#1137, #1138)
+- Project-scope parity: the OpenCode plugin, Hermes plugin, Pi extension, and JSONL replay now resolve `project` the same way the hooks do (env override, git toplevel basename, cwd basename) instead of sending raw filesystem paths, so the same repository shares one memory bucket across agents (#903, #1135); the filesystem watcher accepts `AGENTMEMORY_PROJECT_NAME` with the old `AGENTMEMORY_PROJECT` kept as a deprecated alias; replay handles Windows-recorded paths
+- OpenCode file enrichment matches the agent's lowercase tool names, which the previous capitalized set never did
+- Viewer surfaces health status from non-2xx health responses (#1046)
+- Documented REST endpoint count matches the registered routes again (130)
+
+### Changed
+
+- Local embeddings migrate from `@xenova/transformers` to `@huggingface/transformers` v4 with Node 22+ support; CI now tests Node 20, 22, 24, and 26 (#479, #1096)
+
 ## [0.9.28] — 2026-07-19
 
 Patch release: hardens the hook runner against malformed payloads and closes a cross-agent context leak. No breaking changes; drop-in upgrade.

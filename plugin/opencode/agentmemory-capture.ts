@@ -1,7 +1,12 @@
 import type { Plugin } from "@opencode-ai/plugin";
+import { execFileSync } from "node:child_process";
+import { basename } from "node:path";
 
 const API = process.env.AGENTMEMORY_URL || "http://localhost:3111";
-const FILE_TOOLS = new Set(["Read", "Write", "Edit", "Glob", "Grep"]);
+// OpenCode reports tool names in lowercase ("read", "edit", ...); matching is
+// case-insensitive at the call site so a future casing change cannot silently
+// kill file enrichment again.
+const FILE_TOOLS = new Set(["read", "write", "edit", "glob", "grep"]);
 const FILE_KEYS = ["filePath", "file_path", "path", "file", "pattern"];
 const MAX_STASHED_FILES = 20;
 
@@ -50,8 +55,8 @@ async function observe(
   await post("/observe", {
     hookType,
     sessionId,
-    project: projectPath,
-    cwd: projectPath,
+    project: projectName,
+    cwd: projectCwd,
     timestamp: new Date().toISOString(),
     data,
   });
@@ -59,7 +64,28 @@ async function observe(
 
 let activeSessionId: string | null = null;
 let pendingConfig: Record<string, unknown> | null = null;
-let projectPath: string | null = null;
+// projectName is the canonical scope (same resolution order as the hooks'
+// resolveProject: env override, git toplevel basename, cwd basename) so
+// OpenCode sessions land in the same project bucket as every other agent on
+// the repo. projectCwd keeps the full path for the cwd field.
+let projectName: string | null = null;
+let projectCwd: string | null = null;
+
+function resolveProjectName(dir: string): string {
+  const explicit = process.env.AGENTMEMORY_PROJECT_NAME?.trim();
+  if (explicit) return explicit;
+  try {
+    const top = execFileSync("git", ["rev-parse", "--show-toplevel"], {
+      cwd: dir,
+      stdio: ["ignore", "pipe", "ignore"],
+      encoding: "utf8",
+    }).trim();
+    if (top) return basename(top);
+  } catch {
+    // not a git repo, fall through
+  }
+  return basename(dir) || dir;
+}
 const stashedFiles = new Map<string, Set<string>>();
 const seenSubtaskIds = new Map<string, Set<string>>();
 const seenToolCallIds = new Map<string, Set<string>>();
@@ -168,8 +194,8 @@ function extractErrorMessage(err: unknown): string {
 }
 
 export const AgentmemoryCapturePlugin: Plugin = async (ctx) => {
-  const explicitProject = process.env.AGENTMEMORY_PROJECT_NAME?.trim();
-  projectPath = explicitProject || ctx.worktree || ctx.project?.id || process.cwd();
+  projectCwd = ctx.worktree || ctx.project?.id || process.cwd();
+  projectName = resolveProjectName(projectCwd);
 
   return {
     event: async ({ event }) => {
@@ -194,8 +220,8 @@ export const AgentmemoryCapturePlugin: Plugin = async (ctx) => {
           title: info?.title ?? null,
           parentID: info?.parentID ?? null,
           version: info?.version ?? null,
-          project: projectPath,
-          cwd: projectPath,
+          project: projectName,
+          cwd: projectCwd,
         });
         // cache the context returned at session/start so the
         // chat.system.transform hook injects it without a second fetch.
@@ -582,7 +608,7 @@ export const AgentmemoryCapturePlugin: Plugin = async (ctx) => {
 
     // ── tool.execute.before ──
     "tool.execute.before": async (input, output) => {
-      if (!FILE_TOOLS.has(input.tool)) return;
+      if (!FILE_TOOLS.has(String(input.tool ?? "").toLowerCase())) return;
       const sid = input.sessionID || activeSessionId;
       if (!sid) return;
       const args = output.args as Record<string, unknown> | undefined;
@@ -613,7 +639,7 @@ export const AgentmemoryCapturePlugin: Plugin = async (ctx) => {
         if (typeof ctx !== "string" || ctx.length === 0) {
           const result = await postJson("/context", {
             sessionId: sid,
-            project: projectPath,
+            project: projectName,
           });
           ctx = (result as any)?.context;
         } else {
@@ -651,7 +677,7 @@ export const AgentmemoryCapturePlugin: Plugin = async (ctx) => {
 
       const result = await postJson("/context", {
         sessionId: sid,
-        project: projectPath,
+        project: projectName,
       });
       const ctx = (result as any)?.context;
       if (typeof ctx === "string" && ctx.length > 0) {

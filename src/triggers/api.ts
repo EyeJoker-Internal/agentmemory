@@ -2767,9 +2767,10 @@ export function registerApiTriggers(
       const sinceTime = since ? new Date(since).getTime() : 0;
       const df = <T>(items: T[], field: "updatedAt" | "createdAt") =>
         items.filter((i) => new Date((i as Record<string, unknown>)[field] as string).getTime() > sinceTime);
-      const memories = await kv.list<import("../types.js").Memory>(KV.memories);
+      let memories = await kv.list<import("../types.js").Memory>(KV.memories);
       let actions = await kv.list<import("../types.js").Action>(KV.actions);
       if (project) {
+        memories = memories.filter((m) => m.project === project);
         actions = actions.filter((a) => a.project === project);
       }
       const body: Record<string, unknown> = {

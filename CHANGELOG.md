@@ -38,6 +38,7 @@ Patch release: the `.env` file now actually applies everywhere, imports become s
 - Session-stop consolidation is debounced and no longer double-fires from the client hook; eviction recovery is bounded to one consolidation pass (#1087, #1131 class, via #1136)
 - `/agentmemory/sessions` no longer deadlocks on large session counts (#1100, via #1136)
 - Filesystem watcher validates roots before `fs.watch`, fixing Node 24/26 on Linux (#1136)
+- `GET /agentmemory/export` and `/agentmemory/mesh/export` refuse an over-frame response instead of shipping it: a payload past the engine 16 MiB transport frame used to drop the worker and 404 every endpoint for ~1s. They now fail that one request (413 for mesh, an `oversized` error for export) with a hint to narrow the range, keeping the daemon up (#1142, #890). Full pagination of the non-session collections is a follow-up.
 - Claude bridge writes `MEMORY.md` under the `memory/` subdirectory Claude Code actually reads (#1134)
 - Hook project-resolution tests no longer depend on the checkout directory name (#1137, #1138)
 - Project-scope parity: the OpenCode plugin, Hermes plugin, Pi extension, and JSONL replay now resolve `project` the same way the hooks do (env override, git toplevel basename, cwd basename) instead of sending raw filesystem paths, so the same repository shares one memory bucket across agents (#903, #1135); the filesystem watcher accepts `AGENTMEMORY_PROJECT_NAME` with the old `AGENTMEMORY_PROJECT` kept as a deprecated alias; replay handles Windows-recorded paths

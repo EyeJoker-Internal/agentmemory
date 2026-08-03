@@ -2,6 +2,7 @@ import { TriggerAction, type ISdk, type ApiRequest } from "iii-sdk";
 import type { Session, CompressedObservation, HookPayload, CommitLink, SessionSummary } from "../types.js";
 import { withKeyedLock } from "../state/keyed-mutex.js";
 import { KV } from "../state/schema.js";
+import { checkPayloadFrameSize } from "../state/frame-guard.js";
 import { StateKV } from "../state/kv.js";
 import { getLatestHealth } from "../health/monitor.js";
 import type { MetricsStore } from "../eval/metrics-store.js";
@@ -2788,6 +2789,16 @@ export function registerApiTriggers(
           (n) => new Date(n.updatedAt || n.createdAt).getTime() > sinceTime,
         );
         body.graphEdges = df(graphEdges, "createdAt");
+      }
+      // Same 16 MiB transport-frame ceiling as #1142: a full mesh export past
+      // the frame limit would drop the worker (#890). Fail this one request
+      // with 413 instead of taking the daemon down.
+      const oversized = checkPayloadFrameSize(
+        body,
+        "use ?since to fetch only changes after a timestamp, or ?project to scope the export",
+      );
+      if (oversized) {
+        return { status_code: 413, body: oversized };
       }
       return { status_code: 200, body };
     },

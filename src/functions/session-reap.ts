@@ -54,7 +54,11 @@ export function registerSessionReapFunction(sdk: ISdk, kv: StateKV): void {
       sdk
         .trigger({
           function_id: "event::session::stopped",
-          payload: { sessionId: session.id, skipConsolidation: true },
+          payload: {
+            sessionId: session.id,
+            skipConsolidation: true,
+            skipGraph: true,
+          },
           action: TriggerAction.Void(),
         })
         .catch(() => {});

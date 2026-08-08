@@ -57,7 +57,7 @@ describe("mem::session-reap", () => {
     expect(triggers).toHaveLength(1);
     expect(triggers[0]).toMatchObject({
       function_id: "event::session::stopped",
-      payload: { sessionId: "stale", skipConsolidation: true },
+      payload: { sessionId: "stale", skipConsolidation: true, skipGraph: true },
     });
   });
 

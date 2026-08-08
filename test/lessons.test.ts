@@ -109,6 +109,61 @@ describe("Lessons", () => {
       expect(second.lesson.confidence).toBeGreaterThan(0.5);
     });
 
+    it("strengthens a near-identical lesson in the same project and merges provenance", async () => {
+      const first = (await sdk.trigger("mem::lesson-save", {
+        content: "Run Knip after monorepo changes to remove unused files and exports.",
+        project: "/portal",
+        source: "manual",
+        sourceIds: ["session-a"],
+        tags: ["knip"],
+      })) as { lesson: Lesson };
+
+      const second = (await sdk.trigger("mem::lesson-save", {
+        content: "Run Knip after monorepo changes to remove unused exports and files.",
+        project: "/portal",
+        source: "manual",
+        sourceIds: ["session-b"],
+        tags: ["cleanup"],
+      })) as { action: string; lesson: Lesson };
+
+      expect(second.action).toBe("strengthened");
+      expect(second.lesson.id).toBe(first.lesson.id);
+      expect(second.lesson.sourceIds.sort()).toEqual(["session-a", "session-b"]);
+      expect(second.lesson.tags.sort()).toEqual(["cleanup", "knip"]);
+      expect(await kv.list<Lesson>("mem:lessons")).toHaveLength(1);
+    });
+
+    it("does not merge near-identical lessons across projects", async () => {
+      await sdk.trigger("mem::lesson-save", {
+        content: "Run Knip after monorepo changes to remove unused files and exports.",
+        project: "/portal",
+      });
+      const second = (await sdk.trigger("mem::lesson-save", {
+        content: "Run Knip after monorepo changes to remove unused exports and files.",
+        project: "/soriq",
+      })) as { action: string };
+
+      expect(second.action).toBe("created");
+      expect(await kv.list<Lesson>("mem:lessons")).toHaveLength(2);
+    });
+
+    it("does not merge lessons whose numeric version or negation changes", async () => {
+      await sdk.trigger("mem::lesson-save", {
+        content: "Use migration version 1 and allow legacy fallback.",
+        project: "/portal",
+      });
+      await sdk.trigger("mem::lesson-save", {
+        content: "Use migration version 2 and allow legacy fallback.",
+        project: "/portal",
+      });
+      await sdk.trigger("mem::lesson-save", {
+        content: "Use migration version 1 and never allow legacy fallback.",
+        project: "/portal",
+      });
+
+      expect(await kv.list<Lesson>("mem:lessons")).toHaveLength(3);
+    });
+
     it("rejects empty content", async () => {
       const result = (await sdk.trigger("mem::lesson-save", {
         content: "",

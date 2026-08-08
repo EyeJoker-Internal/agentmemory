@@ -69,10 +69,15 @@ function makeEdge(src: string, tgt: string): GraphEdge {
   };
 }
 
-function makeSemantic(fact: string, id?: string): SemanticMemory {
+function makeSemantic(
+  fact: string,
+  id?: string,
+  project?: string,
+): SemanticMemory {
   return {
     id: id || `sem_${fact.slice(0, 8)}`,
     fact,
+    project,
     confidence: 0.8,
     sourceSessionIds: [],
     sourceMemoryIds: [],
@@ -231,6 +236,42 @@ describe("Reflect", () => {
 
       expect(result.success).toBe(true);
       expect(result.usedFallback).toBe(true);
+    });
+
+    it("does not include semantic facts from another project in reflection", async () => {
+      await kv.set("mem:graph:nodes", "node_security", makeConceptNode("security"));
+      await kv.set("mem:graph:nodes", "node_portal", makeConceptNode("portal"));
+      await kv.set("mem:graph:edges", "edge_1", makeEdge("security", "portal"));
+      await kv.set(
+        "mem:semantic",
+        "sem_a1",
+        makeSemantic("portal security validates tokens", "sem_a1", "/portal"),
+      );
+      await kv.set(
+        "mem:semantic",
+        "sem_a2",
+        makeSemantic("portal security uses layered checks", "sem_a2", "/portal"),
+      );
+      await kv.set(
+        "mem:semantic",
+        "sem_a3",
+        makeSemantic("portal security rejects stale sessions", "sem_a3", "/portal"),
+      );
+      await kv.set(
+        "mem:semantic",
+        "sem_b",
+        makeSemantic(
+          "security OTHER_PROJECT_SECRET uses unrelated policy",
+          "sem_b",
+          "/other",
+        ),
+      );
+
+      await sdk.trigger("mem::reflect", { project: "/portal" });
+
+      expect(provider.summarize).toHaveBeenCalled();
+      const prompts = provider.summarize.mock.calls.map((call) => call[1]).join("\n");
+      expect(prompts).not.toContain("OTHER_PROJECT_SECRET");
     });
 
     it("handles LLM failure gracefully", async () => {

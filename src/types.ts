@@ -505,6 +505,7 @@ export interface SemanticMemory {
   confidence: number;
   sourceSessionIds: string[];
   sourceMemoryIds: string[];
+  project?: string;
   accessCount: number;
   lastAccessedAt: string;
   strength: number;
@@ -520,6 +521,7 @@ export interface ProceduralMemory {
   expectedOutcome?: string;
   frequency: number;
   sourceSessionIds: string[];
+  project?: string;
   sourceObservationIds?: string[];
   tags?: string[];
   concepts?: string[];

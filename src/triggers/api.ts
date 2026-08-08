@@ -2082,6 +2082,50 @@ export function registerApiTriggers(
     config: { api_path: "/agentmemory/semantic", http_method: "GET" },
   });
 
+  sdk.registerFunction("api::semantic-merge",
+    async (
+      req: ApiRequest<{
+        groups?: Array<{ keepId: string; mergeIds: string[] }>;
+        dryRun?: boolean;
+        confirm?: string;
+        reason?: string;
+      }>,
+    ): Promise<Response> => {
+      const configErr = requireConfiguredSecret(secret, "semantic merge");
+      if (configErr) return configErr;
+      const authErr = checkAuth(req, secret);
+      if (authErr) return authErr;
+      if (!Array.isArray(req.body?.groups) || req.body.groups.length === 0) {
+        return { status_code: 400, body: { error: "groups must be a non-empty array" } };
+      }
+      const groups = req.body.groups.map((group) => ({
+        keepId: typeof group?.keepId === "string" ? group.keepId : "",
+        mergeIds: Array.isArray(group?.mergeIds)
+          ? group.mergeIds.filter((id): id is string => typeof id === "string")
+          : [],
+      }));
+      const result = await sdk.trigger({
+        function_id: "mem::semantic-merge",
+        payload: {
+          groups,
+          dryRun: req.body.dryRun,
+          confirm: req.body.confirm,
+          reason: req.body.reason,
+        },
+      });
+      const success =
+        typeof result === "object" && result !== null && "success" in result
+          ? Boolean((result as { success?: unknown }).success)
+          : true;
+      return { status_code: success ? 200 : 400, body: result };
+    },
+  );
+  sdk.registerTrigger({
+    type: "http",
+    function_id: "api::semantic-merge",
+    config: { api_path: "/agentmemory/semantic/merge", http_method: "POST" },
+  });
+
   sdk.registerFunction("api::procedural-list",
     async (req: ApiRequest): Promise<Response> => {
       const authErr = checkAuth(req, secret);

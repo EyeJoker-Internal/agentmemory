@@ -181,8 +181,12 @@ export function registerReflectFunctions(
         ]);
 
       let activeLessons = lessons.filter((l) => !l.deleted);
+      let activeSemantic = semanticMemories;
       if (data?.project) {
         activeLessons = activeLessons.filter((l) => l.project === data.project);
+        activeSemantic = activeSemantic.filter(
+          (memory) => memory.project === data.project,
+        );
       }
 
       let conceptClusters = buildGraphClusters(
@@ -194,7 +198,7 @@ export function registerReflectFunctions(
       const usedFallback = conceptClusters.length === 0;
       if (usedFallback) {
         conceptClusters = buildJaccardClusters(
-          semanticMemories,
+          activeSemantic,
           activeLessons,
           maxClusters,
         );
@@ -210,7 +214,7 @@ export function registerReflectFunctions(
 
         const conceptSet = new Set(conceptNames.map((c) => c.toLowerCase()));
 
-        const clusterFacts = semanticMemories.filter((s) => {
+        const clusterFacts = activeSemantic.filter((s) => {
           const factTerms = s.fact.toLowerCase().split(/\s+/);
           return factTerms.some((t) => conceptSet.has(t));
         });

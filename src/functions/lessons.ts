@@ -1,6 +1,6 @@
 import type { ISdk } from "iii-sdk";
 import type { StateKV } from "../state/kv.js";
-import { KV, fingerprintId } from "../state/schema.js";
+import { KV, fingerprintId, jaccardSimilarity } from "../state/schema.js";
 import type { Lesson } from "../types.js";
 import { recordAudit } from "./audit.js";
 
@@ -15,29 +15,111 @@ function reinforceLesson(lesson: Lesson): void {
   lesson.updatedAt = now;
 }
 
+interface LessonSaveInput {
+  content: string;
+  context?: string;
+  confidence?: number;
+  project?: string;
+  tags?: string[];
+  source?: "crystal" | "manual" | "consolidation";
+  sourceIds?: string[];
+}
+
+function numericSignature(text: string): string {
+  return (text.match(/\b(?:v(?:ersion)?\s*)?\d+(?:\.\d+)*\b/gi) || [])
+    .map((value) => value.toLowerCase().replace(/\s+/g, ""))
+    .sort()
+    .join("|");
+}
+
+function negationSignature(text: string): string {
+  const normalized = text.toLowerCase();
+  const markers = [
+    /\bnot\b/,
+    /\bno\b/,
+    /\bnever\b/,
+    /\bwithout\b/,
+    /\bcannot\b/,
+    /\bdon't\b/,
+    /\bdoesn't\b/,
+    /않/,
+    /아니/,
+    /없/,
+    /금지/,
+  ];
+  return markers.map((marker) => (marker.test(normalized) ? "1" : "0")).join("");
+}
+
+function lessonTokenSimilarity(a: string, b: string): number {
+  const tokenize = (text: string): Set<string> =>
+    new Set(
+      text
+        .normalize("NFKC")
+        .toLowerCase()
+        .match(/[\p{L}\p{N}_]+/gu) || [],
+    );
+  const left = tokenize(a);
+  const right = tokenize(b);
+  if (left.size === 0 || right.size === 0) return 0;
+  let intersection = 0;
+  for (const token of left) if (right.has(token)) intersection++;
+  const tokenScore = intersection / (left.size + right.size - intersection);
+  const hasCjk = /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af]/u.test(
+    `${a}${b}`,
+  );
+  return hasCjk
+    ? Math.max(tokenScore, jaccardSimilarity(a.toLowerCase(), b.toLowerCase()))
+    : tokenScore;
+}
+
+function isNearDuplicateLesson(lesson: Lesson, data: LessonSaveInput): boolean {
+  const source = data.source || "manual";
+  if (lesson.deleted || lesson.project !== data.project || lesson.source !== source) {
+    return false;
+  }
+  if (numericSignature(lesson.content) !== numericSignature(data.content)) {
+    return false;
+  }
+  if (negationSignature(lesson.content) !== negationSignature(data.content)) {
+    return false;
+  }
+  return (
+    lessonTokenSimilarity(lesson.content, data.content) >= 0.85
+  );
+}
+
+function mergeLessonEvidence(lesson: Lesson, data: LessonSaveInput): void {
+  reinforceLesson(lesson);
+  if (data.context && !lesson.context) lesson.context = data.context.trim();
+  lesson.sourceIds = [...new Set([...lesson.sourceIds, ...(data.sourceIds || [])])];
+  lesson.tags = [...new Set([...lesson.tags, ...(data.tags || [])])];
+  if (typeof data.confidence === "number" && data.confidence >= 0 && data.confidence <= 1) {
+    lesson.confidence = Math.max(lesson.confidence, data.confidence);
+  }
+}
+
 export function registerLessonsFunctions(sdk: ISdk, kv: StateKV): void {
   sdk.registerFunction("mem::lesson-save", 
-    async (data: {
-      content: string;
-      context?: string;
-      confidence?: number;
-      project?: string;
-      tags?: string[];
-      source?: "crystal" | "manual" | "consolidation";
-      sourceIds?: string[];
-    }) => {
+    async (data: LessonSaveInput) => {
       if (!data.content?.trim()) {
         return { success: false, error: "content is required" };
       }
 
       const fp = fingerprintId("lsn", data.content.trim().toLowerCase());
-      const existing = await kv.get<Lesson>(KV.lessons, fp);
+      let existing = await kv.get<Lesson>(KV.lessons, fp);
+      if (!existing || existing.deleted) {
+        const lessons = await kv.list<Lesson>(KV.lessons);
+        existing = lessons
+          .filter((lesson) => isNearDuplicateLesson(lesson, data))
+          .sort(
+            (a, b) =>
+              lessonTokenSimilarity(b.content, data.content) -
+              lessonTokenSimilarity(a.content, data.content),
+          )[0];
+      }
 
       if (existing && !existing.deleted) {
-        reinforceLesson(existing);
-        if (data.context && !existing.context) {
-          existing.context = data.context;
-        }
+        mergeLessonEvidence(existing, data);
         await kv.set(KV.lessons, existing.id, existing);
 
         try {

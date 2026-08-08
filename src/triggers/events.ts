@@ -15,16 +15,25 @@ import { logger } from "../logger.js";
 // the per-turn session-stop fan-out.
 const CONSOLIDATION_MARKER_KEY = "consolidation:lastRun";
 
-async function consolidationDueUnserialized(kv: StateKV): Promise<boolean> {
+function consolidationMarkerKey(project?: string): string {
+  return project ? `${CONSOLIDATION_MARKER_KEY}:${project}` : CONSOLIDATION_MARKER_KEY;
+}
+
+async function consolidationDueUnserialized(
+  kv: StateKV,
+  project?: string,
+): Promise<boolean> {
   const cooldownMs = getConsolidationCooldownMs();
   if (cooldownMs <= 0) return true; // debounce disabled
   const now = Date.now();
   const marker = await kv
-    .get<{ at?: number }>(KV.config, CONSOLIDATION_MARKER_KEY)
+    .get<{ at?: number }>(KV.config, consolidationMarkerKey(project))
     .catch(() => null);
   const lastAt = typeof marker?.at === "number" ? marker.at : 0;
   if (now - lastAt < cooldownMs) return false;
-  await kv.set(KV.config, CONSOLIDATION_MARKER_KEY, { at: now }).catch(() => {});
+  await kv
+    .set(KV.config, consolidationMarkerKey(project), { at: now })
+    .catch(() => {});
   return true;
 }
 
@@ -33,9 +42,9 @@ async function consolidationDueUnserialized(kv: StateKV): Promise<boolean> {
 // check through an in-process chain so exactly one concurrent caller wins.
 let consolidationCheckChain: Promise<unknown> = Promise.resolve();
 
-function consolidationDue(kv: StateKV): Promise<boolean> {
+function consolidationDue(kv: StateKV, project?: string): Promise<boolean> {
   const result = consolidationCheckChain.then(() =>
-    consolidationDueUnserialized(kv),
+    consolidationDueUnserialized(kv, project),
   );
   consolidationCheckChain = result.catch(() => false);
   return result;
@@ -100,6 +109,8 @@ export function registerEventTriggers(sdk: ISdk, kv: StateKV): void {
     skipGraph?: boolean;
   }) => {
     const summary = await sdk.trigger({ function_id: "mem::summarize", payload: data });
+    const session = await kv.get<Session>(KV.sessions, data.sessionId);
+    const project = session?.project;
     const fireVoid = (function_id: string, payload: unknown) =>
       sdk
         .trigger({ function_id, payload, action: TriggerAction.Void() })
@@ -147,8 +158,12 @@ export function registerEventTriggers(sdk: ISdk, kv: StateKV): void {
     // otherwise launch repeated full-corpus consolidation. Keep the global
     // consolidation bounded to once per cooldown window.
     if (isConsolidationEnabled() && !data.skipConsolidation) {
-      if (await consolidationDue(kv)) {
-        fireVoid("mem::consolidate-pipeline", { tier: "all", force: true });
+      if (await consolidationDue(kv, project)) {
+        fireVoid("mem::consolidate-pipeline", {
+          tier: "all",
+          force: true,
+          ...(project ? { project } : {}),
+        });
         fireVoid("mem::auto-crystallize", { olderThanDays: 0 });
       }
     }

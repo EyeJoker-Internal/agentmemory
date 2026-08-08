@@ -1156,7 +1156,13 @@ export function registerApiTriggers(
 
   sdk.registerFunction("api::migrate",
     async (
-      req: ApiRequest<{ dbPath?: string; step?: string; dryRun?: boolean }>,
+      req: ApiRequest<{
+        dbPath?: string;
+        step?: string;
+        dryRun?: boolean;
+        includeAmbiguous?: boolean;
+        projectMap?: Record<string, string>;
+      }>,
     ): Promise<Response> => {
       const authErr = checkAuth(req, secret);
       if (authErr) return authErr;
@@ -1170,12 +1176,24 @@ export function registerApiTriggers(
           body: { error: "Either step (string) or dbPath (string) is required" },
         };
       }
+      const projectMap = Object.fromEntries(
+        Object.entries(req.body?.projectMap ?? {}).filter(
+          ([memoryId, project]) =>
+            memoryId.trim().length > 0 &&
+            typeof project === "string" &&
+            project.trim().length > 0,
+        ),
+      );
       const result = await sdk.trigger({
         function_id: "mem::migrate",
         payload: {
           ...(req.body.step !== undefined && { step: req.body.step }),
           ...(req.body.dbPath !== undefined && { dbPath: req.body.dbPath }),
           ...(req.body.dryRun !== undefined && { dryRun: req.body.dryRun }),
+          ...(req.body.includeAmbiguous !== undefined && {
+            includeAmbiguous: req.body.includeAmbiguous,
+          }),
+          ...(Object.keys(projectMap).length > 0 && { projectMap }),
         },
       });
       return { status_code: 200, body: result };

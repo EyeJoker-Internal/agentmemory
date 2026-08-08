@@ -23,6 +23,7 @@ function isAllowedPath(dbPath: string): boolean {
 export async function inferMemoryProjects(
   kv: StateKV,
   dryRun = false,
+  projectMap: Record<string, string> = {},
 ): Promise<{ updated: number; skipped: number; ambiguous: number }> {
   const memories = await kv.list<Memory>(KV.memories);
   const sessionCache = new Map<string, Session | null>();
@@ -41,6 +42,16 @@ export async function inferMemoryProjects(
   for (const memory of memories) {
     if (memory.project) {
       skipped++;
+      continue;
+    }
+
+    const mappedProject = projectMap[memory.id]?.trim();
+    if (mappedProject) {
+      if (!dryRun) {
+        memory.project = mappedProject;
+        await kv.set(KV.memories, memory.id, memory);
+      }
+      updated++;
       continue;
     }
 
@@ -87,12 +98,18 @@ export async function inferMemoryProjects(
 
 export function registerMigrateFunction(sdk: ISdk, kv: StateKV): void {
   sdk.registerFunction("mem::migrate",
-    async (data: { dbPath?: string; step?: string; dryRun?: boolean }) => {
+    async (data: {
+      dbPath?: string;
+      step?: string;
+      dryRun?: boolean;
+      includeAmbiguous?: boolean;
+      projectMap?: Record<string, string>;
+    }) => {
       // In-place KV migration steps (no SQLite dependency).
       if (data.step === "infer-memory-projects") {
         const dryRun = data.dryRun ?? false;
         logger.info("Migration step: infer-memory-projects", { dryRun });
-        const result = await inferMemoryProjects(kv, dryRun);
+        const result = await inferMemoryProjects(kv, dryRun, data.projectMap);
         return { success: true, step: "infer-memory-projects", ...result };
       }
 

@@ -223,6 +223,29 @@ describe("inferMemoryProjects", () => {
     expect(stored?.project).toBe("api");
   });
 
+  it("applies an explicit project map to otherwise ambiguous memories", async () => {
+    const kv = makeMockKV();
+    await kv.set(KV.memories, "mem_a", makeMemory("mem_a", []));
+
+    const result = await inferMemoryProjects(kv, false, { mem_a: "global" });
+
+    expect(result.updated).toBe(1);
+    expect(result.ambiguous).toBe(0);
+    const stored = await kv.get<Memory>(KV.memories, "mem_a");
+    expect(stored?.project).toBe("global");
+  });
+
+  it("does not persist explicit mappings during a dry run", async () => {
+    const kv = makeMockKV();
+    await kv.set(KV.memories, "mem_a", makeMemory("mem_a", []));
+
+    const result = await inferMemoryProjects(kv, true, { mem_a: "global" });
+
+    expect(result.updated).toBe(1);
+    const stored = await kv.get<Memory>(KV.memories, "mem_a");
+    expect(stored?.project).toBeUndefined();
+  });
+
   it("is idempotent when run twice in succession", async () => {
     const kv = makeMockKV();
     await kv.set(KV.sessions, "sess_1", makeSession("sess_1", "api"));

@@ -3,6 +3,7 @@ export interface Session {
   project: string;
   cwd: string;
   startedAt: string;
+  updatedAt?: string;
   endedAt?: string;
   status: "active" | "completed" | "abandoned";
   observationCount: number;
@@ -114,6 +115,7 @@ export interface SessionSummary {
   filesModified: string[];
   concepts: string[];
   observationCount: number;
+  inputFingerprint?: string;
 }
 
 export type HookType =

@@ -405,6 +405,26 @@ describe("Diagnostics Functions", () => {
       expect(check!.fixable).toBe(false);
     });
 
+    it("does not flag a long-lived session with recent activity", async () => {
+      const session = makeSession({
+        status: "active",
+        startedAt: new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString(),
+        updatedAt: new Date().toISOString(),
+      });
+      await kv.set(KV.sessions, session.id, session);
+
+      const result = (await sdk.trigger("mem::diagnose", {
+        categories: ["sessions"],
+      })) as { checks: DiagnosticCheck[] };
+
+      expect(
+        result.checks.some((check) =>
+          check.name.startsWith("abandoned-session:"),
+        ),
+      ).toBe(false);
+      expect(result.checks.some((check) => check.name === "sessions-ok")).toBe(true);
+    });
+
     it("memory with stale isLatest produces fail (fixable)", async () => {
       const oldMemory = makeMemory({ isLatest: true });
       const newMemory = makeMemory({ supersedes: [oldMemory.id] });

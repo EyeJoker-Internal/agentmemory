@@ -1,4 +1,5 @@
 import type { ISdk } from "iii-sdk";
+import { createHash } from "node:crypto";
 import type {
   CompressedObservation,
   SessionSummary,
@@ -7,6 +8,7 @@ import type {
 } from "../types.js";
 import { KV } from "../state/schema.js";
 import { StateKV } from "../state/kv.js";
+import { withKeyedLock } from "../state/keyed-mutex.js";
 import {
   SUMMARY_SYSTEM,
   buildSummaryPrompt,
@@ -226,6 +228,14 @@ function parseSummaryXml(
   };
 }
 
+function observationFingerprint(observations: CompressedObservation[]): string {
+  const input = observations
+    .map((observation) => `${observation.id} ${observation.timestamp}`)
+    .sort()
+    .join("");
+  return createHash("sha256").update(input).digest("hex");
+}
+
 export function registerSummarizeFunction(
   sdk: ISdk,
   kv: StateKV,
@@ -234,13 +244,14 @@ export function registerSummarizeFunction(
 ): void {
   sdk.registerFunction("mem::summarize", 
     async (data: { sessionId: string } | undefined) => {
-      const startMs = Date.now();
       if (!data || typeof data.sessionId !== "string" || !data.sessionId.trim()) {
         return { success: false, error: "sessionId is required" };
       }
       const sessionId = data.sessionId.trim();
 
-      const session = await kv.get<Session>(KV.sessions, sessionId);
+      return withKeyedLock(`summarize:${sessionId}`, async () => {
+        const startMs = Date.now();
+        const session = await kv.get<Session>(KV.sessions, sessionId);
       if (!session) {
         logger.warn("Session not found for summarize", {
           sessionId,
@@ -258,6 +269,44 @@ export function registerSummarizeFunction(
           sessionId,
         });
         return { success: false, error: "no_observations" };
+      }
+
+      const inputFingerprint = observationFingerprint(compressed);
+      const existingSummary = await kv.get<SessionSummary>(KV.summaries, sessionId);
+      const existingCreatedAt = existingSummary
+        ? Date.parse(existingSummary.createdAt)
+        : Number.NaN;
+      const newestObservationAt = Math.max(
+        ...compressed.map((observation) => Date.parse(observation.timestamp)),
+      );
+      if (
+        existingSummary &&
+        !existingSummary.inputFingerprint &&
+        existingSummary.observationCount === compressed.length &&
+        Number.isFinite(existingCreatedAt) &&
+        Number.isFinite(newestObservationAt) &&
+        existingCreatedAt >= newestObservationAt
+      ) {
+        const backfilled = { ...existingSummary, inputFingerprint };
+        await kv.set(KV.summaries, sessionId, backfilled);
+        return {
+          success: true,
+          summary: backfilled,
+          skipped: true,
+          reason: "legacy_summary_backfilled",
+        };
+      }
+      if (existingSummary?.inputFingerprint === inputFingerprint) {
+        logger.info("Session summary unchanged; skipping provider call", {
+          sessionId,
+          observationCount: compressed.length,
+        });
+        return {
+          success: true,
+          summary: existingSummary,
+          skipped: true,
+          reason: "unchanged_observations",
+        };
       }
 
       if (provider.name === "noop") {
@@ -355,6 +404,7 @@ export function registerSummarizeFunction(
         }
 
         const qualityScore = scoreSummary(summaryForValidation);
+        summary.inputFingerprint = inputFingerprint;
 
         await kv.set(KV.summaries, sessionId, summary);
         await safeAudit(kv, "compress", "mem::summarize", [sessionId], {
@@ -393,6 +443,7 @@ export function registerSummarizeFunction(
         });
         return { success: false, error: msg };
       }
+      });
     },
   );
 }

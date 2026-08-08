@@ -2,6 +2,7 @@ import type { ISdk } from "iii-sdk";
 import type { StateKV } from "../state/kv.js";
 import { KV } from "../state/schema.js";
 import { withKeyedLock } from "../state/keyed-mutex.js";
+import { sessionLastActivityMs } from "./session-maintenance.js";
 import { recordAudit } from "./audit.js";
 import type {
   Action,
@@ -294,7 +295,7 @@ export function registerDiagnosticsFunction(sdk: ISdk, kv: StateKV): void {
         for (const session of sessions) {
           if (
             session.status === "active" &&
-            now - new Date(session.startedAt).getTime() > TWENTY_FOUR_HOURS_MS
+            now - sessionLastActivityMs(session) > TWENTY_FOUR_HOURS_MS
           ) {
             checks.push({
               name: `abandoned-session:${session.id}`,

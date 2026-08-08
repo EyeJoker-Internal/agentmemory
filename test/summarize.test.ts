@@ -479,4 +479,82 @@ describe("mem::summarize chunking", () => {
     expect(result.success).toBe(false);
     expect(result.error).toBe("parse_failed");
   });
+
+  it("skips an unchanged session after a successful summary", async () => {
+    const provider = makeProvider([summaryXml({ title: "once" })]);
+    const { handler } = await setupHandler({
+      sessionId: "ses_unchanged",
+      obsCount: 3,
+      provider,
+    });
+
+    const first: any = await handler({ sessionId: "ses_unchanged" });
+    const second: any = await handler({ sessionId: "ses_unchanged" });
+
+    expect(first.success).toBe(true);
+    expect(second.success).toBe(true);
+    expect(second.skipped).toBe(true);
+    expect(provider.calls).toHaveLength(1);
+  });
+
+  it("backfills a safe legacy summary fingerprint without another LLM call", async () => {
+    const provider = makeProvider([summaryXml({ title: "unused" })]);
+    const { handler, kv } = await setupHandler({
+      sessionId: "ses_legacy",
+      obsCount: 3,
+      provider,
+    });
+    await kv.set("summaries", "ses_legacy", {
+      sessionId: "ses_legacy",
+      project: "test-project",
+      createdAt: new Date(Date.now() + 1_000).toISOString(),
+      title: "legacy",
+      narrative: "already summarized",
+      keyDecisions: [],
+      filesModified: [],
+      concepts: [],
+      observationCount: 3,
+    });
+
+    const result: any = await handler({ sessionId: "ses_legacy" });
+
+    expect(result.success).toBe(true);
+    expect(result.skipped).toBe(true);
+    expect(result.reason).toBe("legacy_summary_backfilled");
+    expect(provider.calls).toHaveLength(0);
+    const stored: any = await kv.get("summaries", "ses_legacy");
+    expect(stored.inputFingerprint).toMatch(/^[a-f0-9]{64}$/);
+  });
+
+  it("serializes concurrent summaries for the same session", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const provider: MemoryProvider & { calls: number } = {
+      name: "test",
+      calls: 0,
+      compress: async () => "",
+      summarize: async () => {
+        provider.calls += 1;
+        await gate;
+        return summaryXml({ title: "concurrent" });
+      },
+    };
+    const { handler } = await setupHandler({
+      sessionId: "ses_concurrent",
+      obsCount: 2,
+      provider,
+    });
+
+    const first = handler({ sessionId: "ses_concurrent" });
+    const second = handler({ sessionId: "ses_concurrent" });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    release();
+    const results: any[] = await Promise.all([first, second]);
+
+    expect(results.every((result) => result.success)).toBe(true);
+    expect(results.some((result) => result.skipped)).toBe(true);
+    expect(provider.calls).toBe(1);
+  });
 });

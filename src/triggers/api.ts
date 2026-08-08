@@ -3,6 +3,7 @@ import type { Session, CompressedObservation, HookPayload, CommitLink, SessionSu
 import { withKeyedLock } from "../state/keyed-mutex.js";
 import { KV } from "../state/schema.js";
 import { StateKV } from "../state/kv.js";
+import { selectSessionsPage } from "../functions/session-maintenance.js";
 import { getLatestHealth } from "../health/monitor.js";
 import type { MetricsStore } from "../eval/metrics-store.js";
 import type { ResilientProvider } from "../providers/resilient.js";
@@ -681,6 +682,34 @@ export function registerApiTriggers(
     },
   });
 
+  sdk.registerFunction("api::session-reap",
+    async (req: ApiRequest): Promise<Response> => {
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      const result = await sdk.trigger({
+        function_id: "mem::session-reap",
+        payload: {
+          dryRun: body.dryRun === true,
+          limit: typeof body.limit === "number" ? body.limit : undefined,
+          now: typeof body.now === "string" ? body.now : undefined,
+          thresholdHours:
+            typeof body.thresholdHours === "number"
+              ? body.thresholdHours
+              : undefined,
+        },
+      });
+      return { status_code: 200, body: result };
+    },
+  );
+  sdk.registerTrigger({
+    type: "http",
+    function_id: "api::session-reap",
+    config: {
+      api_path: "/agentmemory/session/reap",
+      http_method: "POST",
+      middleware_function_ids: ["middleware::api-auth"],
+    },
+  });
+
   sdk.registerFunction("api::summarize", 
     async (req: ApiRequest<{ sessionId: string }>): Promise<Response> => {
       const sessionId = asNonEmptyString((req.body as Record<string, unknown>)?.sessionId);
@@ -836,40 +865,56 @@ export function registerApiTriggers(
     async (req: ApiRequest): Promise<Response> => {
       const authErr = checkAuth(req, secret);
       if (authErr) return authErr;
-      const sessions = await kv.list<Session>(KV.sessions);
+      const rows = await kv.list<Session | Record<string, unknown>>(KV.sessions);
       const normalizedAgentId =
         typeof req.query_params?.["agentId"] === "string"
           ? req.query_params["agentId"].trim()
           : undefined;
       const wildcardAgent = normalizedAgentId === "*";
-      const explicitAgentId =
-        normalizedAgentId && !wildcardAgent ? normalizedAgentId : undefined;
-      const filterAgentId = wildcardAgent
+      const agentId = wildcardAgent
         ? undefined
-        : explicitAgentId ??
+        : normalizedAgentId ||
           (isAgentScopeIsolated() ? getAgentId() : undefined);
-      const filtered = filterAgentId
-        ? sessions.filter((s) => s.agentId === filterAgentId)
-        : sessions;
-      // Bounded fan-out: each kv.get is a full engine invocation, so
-      // Promise.all over hundreds of sessions saturates the invocation
-      // pool. Batch in chunks of 10 (parallel within a chunk, sequential
-      // across chunks); the summaries array stays index-aligned with
-      // `filtered`.
+      const rawStatus = req.query_params?.["status"];
+      const status =
+        rawStatus === "active" ||
+        rawStatus === "completed" ||
+        rawStatus === "abandoned"
+          ? rawStatus
+          : undefined;
+      const page = selectSessionsPage(rows, {
+        agentId,
+        project:
+          typeof req.query_params?.["project"] === "string"
+            ? req.query_params["project"].trim() || undefined
+            : undefined,
+        status,
+        limit: parseOptionalInt(req.query_params?.["limit"]),
+        offset: parseOptionalInt(req.query_params?.["offset"]),
+      });
       const summaries: Array<SessionSummary | null> = [];
-      for (let batch = 0; batch < filtered.length; batch += 10) {
-        const chunk = filtered.slice(batch, batch + 10);
+      for (let batch = 0; batch < page.sessions.length; batch += 10) {
+        const chunk = page.sessions.slice(batch, batch + 10);
         const results = await Promise.all(
-          chunk.map((s) =>
-            kv.get<SessionSummary>(KV.summaries, s.id).catch(() => null),
+          chunk.map((session) =>
+            kv.get<SessionSummary>(KV.summaries, session.id).catch(() => null),
           ),
         );
         summaries.push(...results);
       }
-      const withSummary = filtered.map((s, i) =>
-        summaries[i] ? { ...s, summary: summaries[i] } : s,
+      const sessions = page.sessions.map((session, index) =>
+        summaries[index] ? { ...session, summary: summaries[index] } : session,
       );
-      return { status_code: 200, body: { sessions: withSummary } };
+      return {
+        status_code: 200,
+        body: {
+          sessions,
+          total: page.total,
+          malformedCount: page.malformedCount,
+          limit: page.limit,
+          offset: page.offset,
+        },
+      };
     },
   );
   sdk.registerTrigger({

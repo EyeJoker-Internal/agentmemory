@@ -101,7 +101,9 @@ describe("Consolidation Pipeline", () => {
     registerConsolidationPipelineFunction(sdk as never, kv as never, provider as never);
 
     for (let i = 0; i < 3; i++) {
-      await kv.set("mem:summaries", `ses_${i}`, makeSummary(i));
+      const item = makeSummary(i);
+      item.createdAt = new Date().toISOString();
+      await kv.set("mem:summaries", `ses_${i}`, item);
     }
 
     const result = (await sdk.trigger("mem::consolidate-pipeline", {

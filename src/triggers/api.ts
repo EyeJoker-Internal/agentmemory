@@ -4,6 +4,7 @@ import { withKeyedLock } from "../state/keyed-mutex.js";
 import { KV } from "../state/schema.js";
 import { StateKV } from "../state/kv.js";
 import { selectSessionsPage } from "../functions/session-maintenance.js";
+import { rankSemanticForProject } from "../functions/semantic-ranking.js";
 import { getLatestHealth } from "../health/monitor.js";
 import type { MetricsStore } from "../eval/metrics-store.js";
 import type { ResilientProvider } from "../providers/resilient.js";
@@ -1752,12 +1753,27 @@ export function registerApiTriggers(
   });
 
   sdk.registerFunction("api::consolidate-pipeline",
-    async (req: ApiRequest<{ tier?: string }>): Promise<Response> => {
+    async (
+      req: ApiRequest<{
+        tier?: string;
+        force?: boolean;
+        project?: string;
+        flushPending?: boolean;
+      }>,
+    ): Promise<Response> => {
       const authErr = checkAuth(req, secret);
       if (authErr) return authErr;
+      const body = req.body || {};
       try {
-        const result = await sdk.trigger({ function_id: "mem::consolidate-pipeline", payload: req.body || {},
-         });
+        const result = await sdk.trigger({
+          function_id: "mem::consolidate-pipeline",
+          payload: {
+            tier: typeof body.tier === "string" ? body.tier : undefined,
+            force: body.force === true,
+            project: typeof body.project === "string" ? body.project : undefined,
+            flushPending: body.flushPending === true,
+          },
+        });
         return { status_code: 200, body: result };
       } catch {
         return consolidationDisabledResponse();
@@ -2072,14 +2088,56 @@ export function registerApiTriggers(
     async (req: ApiRequest): Promise<Response> => {
       const authErr = checkAuth(req, secret);
       if (authErr) return authErr;
-      const semantic = await kv.list<import("../types.js").SemanticMemory>(KV.semantic);
-      return { status_code: 200, body: { semantic } };
+      const project = req.query_params?.["project"] as string | undefined;
+      const includeLegacyRaw = req.query_params?.["includeLegacy"];
+      const includeLegacy =
+        includeLegacyRaw === undefined || includeLegacyRaw === null
+          ? true
+          : String(includeLegacyRaw).toLowerCase() !== "false";
+      const rows = await kv.list<import("../types.js").SemanticMemory>(KV.semantic);
+      const ranked = rankSemanticForProject(rows, { project, includeLegacy });
+      const semantic = project
+        ? ranked.rows.map((row) => ({
+            ...row,
+            retrievalScope: row.project === project ? "project" : "legacy",
+          }))
+        : ranked.rows;
+      return {
+        status_code: 200,
+        body: {
+          semantic,
+          total: semantic.length,
+          scoped: ranked.scoped,
+          legacy: ranked.legacy,
+          excludedOtherProjects: ranked.excludedOtherProjects,
+        },
+      };
     },
   );
   sdk.registerTrigger({
     type: "http",
     function_id: "api::semantic-list",
     config: { api_path: "/agentmemory/semantic", http_method: "GET" },
+  });
+
+  sdk.registerFunction("api::semantic-status",
+    async (req: ApiRequest): Promise<Response> => {
+      const authErr = checkAuth(req, secret);
+      if (authErr) return authErr;
+      const result = await sdk.trigger({
+        function_id: "mem::semantic-status",
+        payload: {},
+      });
+      return { status_code: 200, body: result };
+    },
+  );
+  sdk.registerTrigger({
+    type: "http",
+    function_id: "api::semantic-status",
+    config: {
+      api_path: "/agentmemory/semantic/status",
+      http_method: "GET",
+    },
   });
 
   sdk.registerFunction("api::semantic-merge",

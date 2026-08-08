@@ -888,6 +888,8 @@ Inspired by how human brains process memory — not unlike sleep consolidation.
 | **Semantic** | Extracted facts and patterns | "What I know" |
 | **Procedural** | Workflows and decision patterns | "How to do it" |
 
+Semantic consolidation consumes only project-scoped session summaries that have not been processed before. It runs when at least five new summaries are pending, flushes a smaller batch after 24 hours, and persists a per-project watermark so sliding windows do not repeatedly re-extract the same history. `/agentmemory/semantic/status` reports processed and pending summary counts. Project-filtered `/agentmemory/semantic?project=<name>` results rank project-scoped facts first and optionally include unscoped legacy facts as a lower-priority fallback (`includeLegacy=false` disables the fallback).
+
 Memories decay over time (Ebbinghaus curve). Frequently accessed memories strengthen. Stale memories auto-evict. Contradictions are detected and resolved.
 
 ### What Gets Captured
@@ -1499,7 +1501,7 @@ Create `~/.agentmemory/.env`:
 
 <h2 id="api"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/tags/light/section-api.svg"><img src="assets/tags/section-api.svg" alt="API" height="32" /></picture></h2>
 
-132 endpoints on port `3111`. The REST API binds to `127.0.0.1` by default. Protected endpoints require `Authorization: Bearer <secret>` when `AGENTMEMORY_SECRET` is set, and mesh sync endpoints require `AGENTMEMORY_SECRET` on both peers.
+133 endpoints on port `3111`. The REST API binds to `127.0.0.1` by default. Protected endpoints require `Authorization: Bearer <secret>` when `AGENTMEMORY_SECRET` is set, and mesh sync endpoints require `AGENTMEMORY_SECRET` on both peers.
 
 <details>
 <summary>Key endpoints</summary>

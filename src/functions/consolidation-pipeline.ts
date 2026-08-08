@@ -27,6 +27,33 @@ interface ConsolidationFingerprintMarker {
   provider: string;
 }
 
+interface SemanticDeltaWatermark {
+  kind: "semantic-delta-watermark";
+  version: 1;
+  project?: string;
+  processedSummaryIds: string[];
+  processedSummaryFingerprints?: Record<string, string>;
+  pendingSince?: string;
+  initializedAt: string;
+  updatedAt: string;
+  lastProcessedAt?: string;
+}
+
+interface SemanticDeltaMigrationMarker {
+  kind: "semantic-delta-migration";
+  version: 1;
+  completedAt: string;
+  migratedExistingCorpus: boolean;
+  summaryCount: number;
+  projectCount: number;
+}
+
+const SEMANTIC_DELTA_MIN_BATCH = 5;
+const SEMANTIC_DELTA_MAX_BATCH = 20;
+const SEMANTIC_DELTA_MAX_WAIT_MS = 24 * 60 * 60 * 1000;
+const SEMANTIC_DELTA_MIGRATION_KEY =
+  "consolidation:semantic:delta:migration:v1";
+
 function normalizeProject(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
@@ -199,34 +226,228 @@ function buildSemanticFingerprint(
     .digest("hex");
 }
 
+function semanticDeltaWatermarkKey(project: string | undefined): string {
+  const scope = project || "__all__";
+  const digest = createHash("sha256").update(scope).digest("hex").slice(0, 16);
+  return `consolidation:semantic:delta:${digest}`;
+}
+
+function summaryDeltaFingerprint(summary: SessionSummary): string {
+  return createHash("sha256")
+    .update(JSON.stringify({
+      sessionId: summary.sessionId,
+      createdAt: summary.createdAt,
+      title: summary.title,
+      narrative: summary.narrative,
+      concepts: summary.concepts,
+    }))
+    .digest("hex");
+}
+
+function sortSummariesOldestFirst(summaries: SessionSummary[]): SessionSummary[] {
+  return [...summaries].sort(
+    (a, b) =>
+      new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime() ||
+      a.sessionId.localeCompare(b.sessionId),
+  );
+}
+
+function validCreatedAt(summary: SessionSummary, fallback: string): string {
+  return Number.isFinite(new Date(summary.createdAt).getTime())
+    ? summary.createdAt
+    : fallback;
+}
+
+async function ensureSemanticDeltaMigration(
+  kv: StateKV,
+  summaries: SessionSummary[],
+  existingSemantic: SemanticMemory[],
+): Promise<boolean> {
+  return withKeyedLock("consolidation:semantic:delta:migration", async () => {
+    const prior = await kv
+      .get<SemanticDeltaMigrationMarker>(KV.config, SEMANTIC_DELTA_MIGRATION_KEY)
+      .catch(() => null);
+    if (prior?.version === 1) return false;
+
+    const now = new Date().toISOString();
+    const migratedExistingCorpus = existingSemantic.length > 0;
+    const projects = new Map<string, SessionSummary[]>();
+    for (const summary of summaries) {
+      const project = normalizeProject(summary.project);
+      if (!project) continue;
+      const group = projects.get(project) || [];
+      group.push(summary);
+      projects.set(project, group);
+    }
+
+    if (migratedExistingCorpus) {
+      const writeWatermark = async (
+        project: string | undefined,
+        items: SessionSummary[],
+      ): Promise<void> => {
+        await kv.set<SemanticDeltaWatermark>(
+          KV.config,
+          semanticDeltaWatermarkKey(project),
+          {
+            kind: "semantic-delta-watermark",
+            version: 1,
+            ...(project ? { project } : {}),
+            processedSummaryIds: items.map((summary) => summary.sessionId),
+            processedSummaryFingerprints: Object.fromEntries(
+              items.map((summary) => [
+                summary.sessionId,
+                summaryDeltaFingerprint(summary),
+              ]),
+            ),
+            initializedAt: now,
+            updatedAt: now,
+            lastProcessedAt: now,
+          },
+        );
+      };
+      await writeWatermark(undefined, summaries);
+      await Promise.all(
+        Array.from(projects.entries()).map(([project, items]) =>
+          writeWatermark(project, items),
+        ),
+      );
+    }
+
+    await kv.set<SemanticDeltaMigrationMarker>(
+      KV.config,
+      SEMANTIC_DELTA_MIGRATION_KEY,
+      {
+        kind: "semantic-delta-migration",
+        version: 1,
+        completedAt: now,
+        migratedExistingCorpus,
+        summaryCount: summaries.length,
+        projectCount: projects.size,
+      },
+    );
+    return migratedExistingCorpus;
+  });
+}
+
+function nextPendingSince(
+  summaries: SessionSummary[],
+  fallback: string,
+): string | undefined {
+  return summaries.length > 0
+    ? validCreatedAt(summaries[0], fallback)
+    : undefined;
+}
+
 async function runSemanticConsolidation(
   kv: StateKV,
   provider: MemoryProvider,
   project: string | undefined,
+  flushPending: boolean,
 ): Promise<Record<string, unknown>> {
   const lockKey = `consolidation:semantic:${project || "__all__"}`;
   return withKeyedLock(lockKey, async () => {
     const summaries = await kv.list<SessionSummary>(KV.summaries);
     const existingSemantic = await kv.list<SemanticMemory>(KV.semantic);
-    const scopedSummaries = project
-      ? summaries.filter((summary) => summary.project === project)
-      : summaries;
+    const scopedSummaries = sortSummariesOldestFirst(
+      project
+        ? summaries.filter((summary) => summary.project === project)
+        : summaries,
+    );
     const scopedSemantic = project
       ? existingSemantic.filter((item) => item.project === project)
       : existingSemantic;
 
-    if (scopedSummaries.length < 5) {
-      return { skipped: true, reason: "fewer than 5 summaries" };
+    const migrated = await ensureSemanticDeltaMigration(
+      kv,
+      summaries,
+      existingSemantic,
+    );
+    if (migrated) {
+      return {
+        skipped: true,
+        reason: "delta_watermark_initialized",
+        processedSummaries: scopedSummaries.length,
+        pendingSummaries: 0,
+        totalSummaries: scopedSummaries.length,
+      };
     }
 
-    const recentSummaries = scopedSummaries
-      .sort(
-        (a, b) =>
-          new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
-      )
-      .slice(0, 20);
+    const now = new Date().toISOString();
+    const watermarkKey = semanticDeltaWatermarkKey(project);
+    const priorWatermark = await kv
+      .get<SemanticDeltaWatermark>(KV.config, watermarkKey)
+      .catch(() => null);
+    const watermark: SemanticDeltaWatermark =
+      priorWatermark?.kind === "semantic-delta-watermark" &&
+      priorWatermark.version === 1
+        ? priorWatermark
+        : {
+            kind: "semantic-delta-watermark",
+            version: 1,
+            ...(project ? { project } : {}),
+            processedSummaryIds: [],
+            processedSummaryFingerprints: {},
+            initializedAt: now,
+            updatedAt: now,
+          };
+    const storedFingerprints = watermark.processedSummaryFingerprints || {};
+    const processedFingerprints: Record<string, string> = {};
+    const processedIds = new Set<string>();
+    for (const summary of scopedSummaries) {
+      const fingerprint = summaryDeltaFingerprint(summary);
+      if (storedFingerprints[summary.sessionId] === fingerprint) {
+        processedIds.add(summary.sessionId);
+        processedFingerprints[summary.sessionId] = fingerprint;
+      }
+    }
+    const pending = scopedSummaries.filter(
+      (summary) => !processedIds.has(summary.sessionId),
+    );
+
+    if (pending.length === 0) {
+      return {
+        skipped: true,
+        reason: "unchanged_input",
+        processedSummaries: processedIds.size,
+        pendingSummaries: 0,
+        totalSummaries: scopedSummaries.length,
+      };
+    }
+
+    const pendingSince =
+      watermark.pendingSince || validCreatedAt(pending[0], now);
+    const pendingAgeMs = Math.max(
+      0,
+      Date.now() - new Date(pendingSince).getTime(),
+    );
+    const dueByAge = pendingAgeMs >= SEMANTIC_DELTA_MAX_WAIT_MS;
+    const dueByCount = pending.length >= SEMANTIC_DELTA_MIN_BATCH;
+
+    if (!flushPending && !dueByCount && !dueByAge) {
+      watermark.pendingSince = pendingSince;
+      watermark.processedSummaryIds = Array.from(processedIds);
+      watermark.processedSummaryFingerprints = processedFingerprints;
+      watermark.updatedAt = now;
+      await kv.set(KV.config, watermarkKey, watermark);
+      return {
+        skipped: true,
+        reason:
+          scopedSummaries.length < SEMANTIC_DELTA_MIN_BATCH
+            ? "fewer than 5 summaries"
+            : "waiting_for_delta_batch",
+        processedSummaries: processedIds.size,
+        pendingSummaries: pending.length,
+        minimumBatch: SEMANTIC_DELTA_MIN_BATCH,
+        nextEligibleAt: new Date(
+          new Date(pendingSince).getTime() + SEMANTIC_DELTA_MAX_WAIT_MS,
+        ).toISOString(),
+        totalSummaries: scopedSummaries.length,
+      };
+    }
+
+    const batch = pending.slice(0, SEMANTIC_DELTA_MAX_BATCH);
     const prompt = buildSemanticMergePrompt(
-      recentSummaries.map((summary) => ({
+      batch.map((summary) => ({
         title: summary.title,
         narrative: summary.narrative,
         concepts: summary.concepts,
@@ -236,17 +457,32 @@ async function runSemanticConsolidation(
       provider,
       project,
       prompt,
-      recentSummaries,
+      batch,
     );
     const markerKey = semanticFingerprintKey(project);
     const marker = await kv
       .get<ConsolidationFingerprintMarker>(KV.config, markerKey)
       .catch(() => null);
     if (marker?.fingerprint === fingerprint) {
+      for (const summary of batch) {
+        processedIds.add(summary.sessionId);
+        processedFingerprints[summary.sessionId] = summaryDeltaFingerprint(summary);
+      }
+      const remaining = pending.slice(batch.length);
+      await kv.set<SemanticDeltaWatermark>(KV.config, watermarkKey, {
+        ...watermark,
+        processedSummaryIds: Array.from(processedIds),
+        processedSummaryFingerprints: processedFingerprints,
+        pendingSince: nextPendingSince(remaining, now),
+        updatedAt: now,
+        lastProcessedAt: marker.completedAt,
+      });
       return {
         skipped: true,
         reason: "unchanged_input",
         inputFingerprint: fingerprint,
+        processedSummaries: batch.length,
+        pendingSummaries: remaining.length,
         totalSummaries: scopedSummaries.length,
       };
     }
@@ -255,13 +491,12 @@ async function runSemanticConsolidation(
     const factRegex = /<fact\s+confidence="([^"]+)">([^<]+)<\/fact>/g;
     let match;
     let newFacts = 0;
-    const now = new Date().toISOString();
+    const sourceSessionIds = batch.map((summary) => summary.sessionId);
 
     while ((match = factRegex.exec(response)) !== null) {
       const parsedConf = parseFloat(match[1]);
       const confidence = Number.isNaN(parsedConf) ? 0.5 : parsedConf;
       const fact = match[2].trim();
-      const sourceSessionIds = recentSummaries.map((summary) => summary.sessionId);
       const existing = findSemanticCandidate(
         scopedSemantic,
         fact,
@@ -300,19 +535,101 @@ async function runSemanticConsolidation(
       }
     }
 
-    const completedAt = new Date().toISOString();
+    for (const summary of batch) {
+      processedIds.add(summary.sessionId);
+      processedFingerprints[summary.sessionId] = summaryDeltaFingerprint(summary);
+    }
+    const remaining = pending.slice(batch.length);
+    await kv.set<SemanticDeltaWatermark>(KV.config, watermarkKey, {
+      ...watermark,
+      processedSummaryIds: Array.from(processedIds),
+      processedSummaryFingerprints: processedFingerprints,
+      pendingSince: nextPendingSince(remaining, now),
+      updatedAt: now,
+      lastProcessedAt: now,
+    });
     await kv.set<ConsolidationFingerprintMarker>(KV.config, markerKey, {
       fingerprint,
-      completedAt,
+      completedAt: now,
       ...(project ? { project } : {}),
       provider: providerSignature(provider),
     });
     return {
       newFacts,
+      processedSummaries: batch.length,
+      pendingSummaries: remaining.length,
       totalSummaries: scopedSummaries.length,
       inputFingerprint: fingerprint,
     };
   });
+}
+
+async function semanticDeltaStatus(
+  kv: StateKV,
+): Promise<Record<string, unknown>> {
+  const [summaries, semantic, configRows] = await Promise.all([
+    kv.list<SessionSummary>(KV.summaries),
+    kv.list<SemanticMemory>(KV.semantic),
+    kv.list<unknown>(KV.config).catch(() => []),
+  ]);
+  const watermarks = configRows
+    .filter(
+      (row) =>
+        typeof row === "object" &&
+        row !== null &&
+        (row as SemanticDeltaWatermark).kind === "semantic-delta-watermark" &&
+        (row as SemanticDeltaWatermark).version === 1,
+    )
+    .map((row) => row as SemanticDeltaWatermark);
+  const migrationRow = configRows.find(
+    (row) =>
+      typeof row === "object" &&
+      row !== null &&
+      (row as SemanticDeltaMigrationMarker).kind === "semantic-delta-migration" &&
+      (row as SemanticDeltaMigrationMarker).version === 1,
+  );
+  const migration = migrationRow as SemanticDeltaMigrationMarker | undefined;
+  const projectNames = new Set<string>();
+  for (const summary of summaries) {
+    const project = normalizeProject(summary.project);
+    if (project) projectNames.add(project);
+  }
+  for (const watermark of watermarks) {
+    if (watermark.project) projectNames.add(watermark.project);
+  }
+  const projects = Array.from(projectNames)
+    .sort()
+    .map((project) => {
+      const projectSummaries = summaries.filter(
+        (summary) => summary.project === project,
+      );
+      const watermark = watermarks.find((item) => item.project === project);
+      const processedSummaries = watermark
+        ? projectSummaries.filter((summary) => {
+            const stored = watermark.processedSummaryFingerprints?.[summary.sessionId];
+            return stored
+              ? stored === summaryDeltaFingerprint(summary)
+              : watermark.processedSummaryIds.includes(summary.sessionId);
+          }).length
+        : 0;
+      return {
+        project,
+        totalSummaries: projectSummaries.length,
+        processedSummaries,
+        pendingSummaries: projectSummaries.length - processedSummaries,
+        pendingSince: watermark?.pendingSince,
+      };
+    });
+  return {
+    success: true,
+    migration: migration || null,
+    projects,
+    semantic: {
+      total: semantic.length,
+      projectScoped: semantic.filter((item) => Boolean(item.project)).length,
+      legacyUnscoped: semantic.filter((item) => !item.project).length,
+    },
+  };
 }
 
 function applyDecay(
@@ -344,8 +661,17 @@ export function registerConsolidationPipelineFunction(
   kv: StateKV,
   provider: MemoryProvider,
 ): void {
+  sdk.registerFunction("mem::semantic-status", async () =>
+    semanticDeltaStatus(kv),
+  );
+
   sdk.registerFunction("mem::consolidate-pipeline", 
-    async (data?: { tier?: string; force?: boolean; project?: string }) => {
+    async (data?: {
+      tier?: string;
+      force?: boolean;
+      project?: string;
+      flushPending?: boolean;
+    }) => {
       if (!data?.force && !isConsolidationEnabled()) {
         return { success: false, skipped: true, reason: "Consolidation disabled: set CONSOLIDATION_ENABLED=true or configure an LLM provider (ANTHROPIC_API_KEY / OPENAI_API_KEY / OPENROUTER_API_KEY / GEMINI_API_KEY / GOOGLE_API_KEY / MINIMAX_API_KEY / OPENAI_BASE_URL / AGENTMEMORY_PROVIDER=agent-sdk)" };
       }
@@ -360,6 +686,7 @@ export function registerConsolidationPipelineFunction(
             kv,
             provider,
             project,
+            data?.flushPending === true,
           );
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);

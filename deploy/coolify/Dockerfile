@@ -1,12 +1,19 @@
 ARG III_VERSION=0.11.2
 
+FROM node:22-slim AS builder
+
+WORKDIR /src
+COPY package.json ./
+RUN npm install --ignore-scripts --no-fund --no-audit
+COPY . .
+RUN npm run build \
+ && npm prune --omit=dev --omit=optional --ignore-scripts --no-fund --no-audit
+
 FROM iiidev/iii:${III_VERSION} AS iii-image
 
 FROM node:22-slim
 
-ARG AGENTMEMORY_VERSION=0.9.28
 ARG III_VERSION=0.11.2
-ARG III_SDK_VERSION=0.11.2
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends openssl ca-certificates tini gosu curl \
@@ -15,14 +22,17 @@ RUN apt-get update \
 COPY --from=iii-image /app/iii /usr/local/bin/iii
 
 WORKDIR /opt/agentmemory
-RUN printf '{"name":"agentmemory-deploy","version":"1.0.0","private":true,"overrides":{"iii-sdk":"%s"}}\n' "${III_SDK_VERSION}" > package.json \
- && npm install "@agentmemory/agentmemory@${AGENTMEMORY_VERSION}" --omit=optional --no-fund --no-audit \
- && ln -s /opt/agentmemory/node_modules/.bin/agentmemory /usr/local/bin/agentmemory
+COPY --from=builder /src/node_modules ./node_modules
+COPY --from=builder /src/dist ./dist
+COPY --from=builder /src/package.json ./package.json
+RUN chmod 0755 /opt/agentmemory/dist/cli.mjs \
+ && ln -s /opt/agentmemory/dist/cli.mjs /usr/local/bin/agentmemory
 
 ENV AGENTMEMORY_III_VERSION=${III_VERSION} \
+    NODE_ENV=production \
     TINI_SUBREAPER=1
 
-COPY --chmod=0755 entrypoint.sh /usr/local/bin/agentmemory-entrypoint.sh
+COPY --chmod=0755 deploy/coolify/entrypoint.sh /usr/local/bin/agentmemory-entrypoint.sh
 
 EXPOSE 3111
 

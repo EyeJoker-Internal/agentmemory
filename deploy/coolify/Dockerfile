@@ -3,8 +3,8 @@ ARG III_VERSION=0.11.2
 FROM node:22-slim AS builder
 
 WORKDIR /src
-COPY package.json ./
-RUN npm install --ignore-scripts --no-fund --no-audit
+COPY package.json package-lock.json ./
+RUN npm ci --ignore-scripts --no-fund --no-audit
 COPY . .
 RUN npm run build \
  && npm prune --omit=dev --omit=optional --ignore-scripts --no-fund --no-audit

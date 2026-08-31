@@ -8,6 +8,7 @@ import os
 import re
 import tempfile
 import unicodedata
+import urllib.error
 import urllib.request
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -48,6 +49,7 @@ def request_json(
     method: str,
     path: str,
     body: dict[str, Any] | None = None,
+    accepted_statuses: frozenset[int] = frozenset(),
 ) -> dict[str, Any]:
     data = None if body is None else json.dumps(body).encode()
     request = urllib.request.Request(
@@ -61,8 +63,13 @@ def request_json(
             "User-Agent": "Mozilla/5.0",
         },
     )
-    with urllib.request.urlopen(request, timeout=120) as response:
-        return json.loads(response.read().decode(), strict=False)
+    try:
+        with urllib.request.urlopen(request, timeout=120) as response:
+            return json.loads(response.read().decode(), strict=False)
+    except urllib.error.HTTPError as error:
+        if error.code not in accepted_statuses:
+            raise
+        return json.loads(error.read().decode(), strict=False)
 
 
 def load_inputs(fixture_dir: Path | None) -> dict[str, dict[str, Any]]:
@@ -73,7 +80,13 @@ def load_inputs(fixture_dir: Path | None) -> dict[str, dict[str, Any]]:
         }
     base_url, secret = resolve_runtime()
     return {
-        "health": request_json(base_url, secret, "GET", "/agentmemory/health"),
+        "health": request_json(
+            base_url,
+            secret,
+            "GET",
+            "/agentmemory/health",
+            accepted_statuses=frozenset({503}),
+        ),
         "semantic": request_json(base_url, secret, "GET", "/agentmemory/semantic"),
         "status": request_json(
             base_url,
@@ -176,18 +189,20 @@ def lifecycle_signature(value: str) -> tuple[str, ...]:
 
 
 def semantic_metrics(rows: list[dict[str, Any]]) -> dict[str, int]:
-    exact: dict[str, list[str]] = defaultdict(list)
+    exact: dict[tuple[str, str], list[str]] = defaultdict(list)
     for row in rows:
-        key = canonical(str(row.get("fact", "")))
-        if key:
-            exact[key].append(str(row.get("id", "")))
+        fact_key = canonical(str(row.get("fact", "")))
+        if fact_key:
+            scope = str(row.get("project") or "__legacy__")
+            exact[(scope, fact_key)].append(str(row.get("id", "")))
     exact_groups = sum(1 for ids in exact.values() if len(ids) > 1)
 
-    source_groups: dict[tuple[str, ...], list[dict[str, Any]]] = defaultdict(list)
+    source_groups: dict[tuple[str, tuple[str, ...]], list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
         source = tuple(sorted(str(value) for value in row.get("sourceSessionIds", [])))
         if source:
-            source_groups[source].append(row)
+            scope = str(row.get("project") or "__legacy__")
+            source_groups[(scope, source)].append(row)
 
     same_source_pairs = 0
     for group in source_groups.values():
@@ -277,6 +292,8 @@ def main() -> int:
         fail = int(diagnostics.get("fail") or 0)
         passed = int(diagnostics.get("pass") or 0)
         warnings: list[str] = []
+        if inputs["health"].get("status") != "healthy":
+            warnings.append("health")
         if quality["exactGroups"]:
             warnings.append("exact_duplicates")
         if quality["sameSourcePairs"]:
@@ -292,18 +309,19 @@ def main() -> int:
 
         delta_text = "first" if delta is None else f"{delta:+d}"
         warning_text = ",".join(warnings) if warnings else "none"
-        print(
-            "AgentMemory 주간 품질 감사"
-            f" | health={inputs['health'].get('status', 'unknown')}"
-            f" | semantic={current_count} delta={delta_text}"
-            f" | scoped={scoped} legacy={legacy}"
-            f" | exactGroups={quality['exactGroups']}"
-            f" | sameSourcePairs={quality['sameSourcePairs']}"
-            f" | pending={pending} maxPending={max_pending}"
-            f" | stale={stale}"
-            f" | diagnose={passed}/{warn}/{fail}"
-            f" | warnings={warning_text}"
-        )
+        if warnings:
+            print(
+                "AgentMemory 주간 품질 감사"
+                f" | health={inputs['health'].get('status', 'unknown')}"
+                f" | semantic={current_count} delta={delta_text}"
+                f" | scoped={scoped} legacy={legacy}"
+                f" | exactGroups={quality['exactGroups']}"
+                f" | sameSourcePairs={quality['sameSourcePairs']}"
+                f" | pending={pending} maxPending={max_pending}"
+                f" | stale={stale}"
+                f" | diagnose={passed}/{warn}/{fail}"
+                f" | warnings={warning_text}"
+            )
         write_state(
             args.state_file,
             {

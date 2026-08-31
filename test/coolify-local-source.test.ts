@@ -22,4 +22,13 @@ describe("Coolify source deployment", () => {
     expect(dockerignore).toContain(".git");
     expect(dockerignore).toContain("dist");
   });
+
+  it("keeps ignored lockfiles out of no-lock-policy Docker builds", () => {
+    expect(dockerfile).toContain("COPY package.json ./");
+    expect(dockerfile).not.toContain("COPY package.json package-lock.json");
+    expect(dockerfile).toContain("--legacy-peer-deps");
+    expect(dockerignore).toContain("package-lock.json");
+    expect(dockerignore).toContain("pnpm-lock.yaml");
+    expect(dockerignore).toContain("yarn.lock");
+  });
 });
